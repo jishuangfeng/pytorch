@@ -22,8 +22,11 @@ from torch.testing._internal.distributed.rpc_utils import (
 )
 
 
-if torch.cuda.is_available():
-    torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+if torch.accelerator.is_available():
+    device_type = torch.accelerator.current_accelerator().type
+    torch.get_device_module(device_type).memory._set_allocator_settings(
+        "expandable_segments:False"
+    )
 
 globals().update(
     generate_tests(
