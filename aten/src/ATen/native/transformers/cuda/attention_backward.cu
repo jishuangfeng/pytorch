@@ -249,6 +249,9 @@ std::tuple<Tensor, Tensor, Tensor> _cudnn_attention_backward(
 
     const bool is_nested = cum_seq_q.defined();
     TORCH_CHECK(
+        is_nested || query.size(2) != 1 || !sdp::is_cudnn_attention_decode_disabled(),
+        "cuDNN SDPA decode is disabled for cuDNN versions 9.19-9.25.0 (except 9.24.1) on SM 10.x and 11.x.");
+    TORCH_CHECK(
         !is_nested || max_q > 128,
         "cuDNN varlen attention does not support query sequence length <= 128.");
 
@@ -651,7 +654,6 @@ _efficient_attention_backward(
     const auto lse_batch_size =
         cu_seqlens_q.has_value() ? cu_seqlens_q->size(0) - 1 : B;
     at::Tensor softmax_lse = logsumexp.view({lse_batch_size * nH, max_seqlen_q});
-    hipError_t err;
     using sdp::aotriton_adapter::mk_aotensor;
     using sdp::aotriton_adapter::mk_aoscalartensor;
     using sdp::aotriton_adapter::cast_dtype;
@@ -706,10 +708,11 @@ _efficient_attention_backward(
     }
     aotriton::v3::flash::attn_options opts;
     opts.deterministic = deterministic;
-    err = aotriton::v3::flash::attn_bwd(params,
-                                        aotriton::v3::flash::attn_bwd_params::kVersion,
-                                        stream,
-                                        &opts);
+    AT_CUDA_CHECK(aotriton::v3::flash::attn_bwd(
+        params,
+        aotriton::v3::flash::attn_bwd_params::kVersion,
+        stream,
+        &opts));
 #else  // DISABLE_AOTRITON
     TORCH_CHECK(false, "Attempting to use aotriton mem_eff_backward backend in a build that has not built AOTriton");
 #endif
