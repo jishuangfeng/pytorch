@@ -2253,6 +2253,10 @@ TEST(StaticRuntime, Narrow) {
 
   testStaticRuntime(narrow_with_int_script, args_a);
   testStaticRuntime(narrow_with_int_script, args_a, args_b);
+
+  auto c = at::tensor({1, 2, 3, 4, 5, 6, 7, 8, 9}).reshape({3, 3});
+  std::vector<IValue> args_c{c, -1, -1, 1};
+  testStaticRuntime(narrow_with_int_script, args_c);
 }
 
 TEST(StaticRuntime, TupleUnpack) {
@@ -3084,6 +3088,10 @@ namespace {
 
 void maybe_throw(bool should_throw) {
   if (should_throw) {
+    // The ModelCrash* tests below assert EXPECT_THROW(..., std::runtime_error)
+    // on what escapes the runtime. c10::Error derives from std::exception, not
+    // std::runtime_error, so TORCH_CHECK here would stop matching.
+    // @allow-raw-throw: tests below match on std::runtime_error
     throw std::runtime_error("test exception");
   }
 }
@@ -3394,7 +3402,7 @@ TEST(StaticRuntime, TupleIndex) {
   torch::jit::Module mod("module");
   mod.define(src);
   StaticModule smod(mod);
-  EXPECT_THROW(smod({100, tuple}), std::out_of_range);
+  EXPECT_THROW(smod({100, tuple}), c10::IndexError);
 }
 
 TEST(StaticRuntime, RaiseException) {
@@ -3593,10 +3601,9 @@ TEST(StaticRuntime, IntImplicit_ThrowOnBadInputs) {
   auto graph = getGraphFromIR(src);
   torch::jit::StaticModule smod(graph);
   // Not 0D tensor
-  EXPECT_THROW(smod({at::tensor({1, 2}, at::kInt)}), std::runtime_error);
+  EXPECT_THROW(smod({at::tensor({1, 2}, at::kInt)}), c10::Error);
   // Wrong dtype
-  EXPECT_THROW(
-      smod({at::tensor({1}, at::kFloat).squeeze()}), std::runtime_error);
+  EXPECT_THROW(smod({at::tensor({1}, at::kFloat).squeeze()}), c10::Error);
 }
 
 TEST(StaticRuntime, Select) {
