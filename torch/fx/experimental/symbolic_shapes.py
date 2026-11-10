@@ -43,6 +43,7 @@ from typing import (
     Generic,
     NamedTuple,
     NoReturn,
+    overload,
     TYPE_CHECKING,
     TypeAlias,
     TypeGuard,
@@ -128,16 +129,36 @@ from torch.fx.experimental._size_hinting import (
 )
 
 
+@overload
+def guarding_hint_or_throw(a: torch.SymBool | bool) -> bool: ...
+
+
+@overload
+def guarding_hint_or_throw(a: torch.SymInt | int) -> int: ...
+
+
+@overload
+def guarding_hint_or_throw(a: torch.SymFloat | float) -> float: ...
+
+
+@overload
+def guarding_hint_or_throw(a: SymNode) -> int | bool | float: ...
+
+
 def guarding_hint_or_throw(
-    a: torch.SymInt | torch.SymBool | int | bool | SymNode,
-) -> int | bool:
+    a: torch.SymInt | torch.SymFloat | torch.SymBool | int | float | bool | SymNode,
+) -> int | bool | float:
     """
     Return a concrete hint for a symbolic value, for use in guarding decisions.
 
     Returns Python bool (True/False) for boolean inputs (SymBool, bool),
-    and Python int for integer inputs (SymInt, int).
+    Python int for integer inputs (SymInt, int), Python float for floating-point
+    inputs (SymFloat, float), and for a SymNode a value matching its pytype.
     """
     if isinstance(a, SymNode):
+        # maybe_set_item_memo relies on this never filling in a SymFloat's hint
+        if a.pytype not in (int, bool):
+            raise AssertionError(f"Expected an int or bool SymNode, got {a.pytype}")
         if a._hint is not None:
             return a._hint  # pyrefly: ignore[bad-return]
         if a.shape_env is None:
@@ -145,12 +166,12 @@ def guarding_hint_or_throw(
         hint = a.shape_env.guarding_hint_or_throw(a.expr)
         a._hint = hint
         return hint
-    if isinstance(a, (torch.SymInt, torch.SymBool)):
+    if isinstance(a, (torch.SymInt, torch.SymFloat, torch.SymBool)):
         return guarding_hint_or_throw(a.node)
     if isinstance(a, bool):
         return a
-    if type(a) is not int:
-        raise AssertionError(f"Expected int, got {type(a)}")
+    if type(a) not in (int, float):
+        raise AssertionError(f"Expected int or float, got {type(a)}")
     return a
 
 
@@ -1868,25 +1889,14 @@ def constrain_range(a: SymInt, *, min: int | None, max: int | None = None) -> No
     a.node.shape_env._constrain_range(a.node.expr, min, max)
 
 
+@deprecated(
+    "`torch.fx.experimental.symbolic_shapes.constrain_unify` is deprecated, "
+    "please use `torch._check(a == b)` instead.",
+    category=FutureWarning,
+)
 def constrain_unify(a: torch.SymInt, b: torch.SymInt) -> None:
-    """
-    Given two SymInts, constrain them so that they must be equal.  NB:
-    this will not work with SymInts that represent nontrivial expressions
-    (yet!)
-    """
-    if not isinstance(a, SymInt):
-        if not isinstance(b, SymInt):
-            if a != b:
-                raise AssertionError(f"Expected {a} == {b}")
-            return
-        else:
-            shape_env = b.node.shape_env
-    else:
-        shape_env = a.node.shape_env
-
-    if shape_env is None:
-        raise AssertionError("shape_env should not be None")
-    shape_env._constrain_unify(a, b)
+    """Given two SymInts, constrain them so that they must be equal."""
+    torch._check(a == b)
 
 
 # Assume that a boolean is true for the purposes of subsequent symbolic
@@ -4654,47 +4664,6 @@ class ShapeEnv:
                 compiler_min=min,
                 compiler_max=max,
             )
-
-    @record_shapeenv_event()
-    def _constrain_unify(self, a: SymInt, b: SymInt) -> None:
-        """
-        Given two SymInts, constrain them so that they must be equal.  NB:
-        this will not work with SymInts that represent nontrivial expressions
-        (yet!)
-        """
-        # TODO: this does not install a deferred runtime assert yet
-
-        # TODO: Maybe dedupe this with _maybe_guard_rel?
-        # Update Feb 2024: this is extra important to do, this doesn't handle
-        # unbacked replacements properly nor does it generate deferred runtime
-        # asserts
-        if not isinstance(a, SymInt):
-            if not isinstance(b, SymInt):
-                if a != b:
-                    raise AssertionError(f"Expected {a} == {b}")
-            else:
-                if not isinstance(b.node.expr, sympy.Symbol):
-                    raise AssertionError("constraining non-Symbols NYI")
-                if b.node.shape_env is not self:
-                    raise AssertionError("b.node.shape_env must be self")
-                self.replacements[b.node.expr] = sympy.Integer(a)
-        else:
-            # TODO: Actually, we can support this as long as one of them is a symbol.
-            # NB: We can't actually do "unification" as our operators are not
-            # injective
-            if not isinstance(a.node.expr, sympy.Symbol):
-                raise AssertionError("constraining non-Symbols NYI")
-            if a.node.shape_env is not self:
-                raise AssertionError("a.node.shape_env must be self")
-            if not isinstance(b, SymInt):
-                self.replacements[a.node.expr] = sympy.Integer(b)
-            else:
-                if a.node.shape_env is not b.node.shape_env:
-                    raise AssertionError("a.node.shape_env must be b.node.shape_env")
-                if not isinstance(b.node.expr, sympy.Symbol):
-                    raise AssertionError("constraining non-Symbols NYI")
-                new_var = self._find(a.node.expr)
-                self.replacements[b.node.expr] = new_var
 
     def _ignore_fresh_unbacked_symbols_tls(self) -> bool:
         return _ignore_fresh_unbacked_symbols_tls()
@@ -7919,12 +7888,12 @@ class ShapeEnv:
         return result_expr
 
     @lru_cache(256)
-    def guarding_hint_or_throw(self, expr: sympy.Expr | int) -> int | bool:
+    def guarding_hint_or_throw(self, expr: sympy.Expr | int) -> int | bool | float:
         """
         Return a concrete hint for an expression.
 
         Returns Python bool (True/False) for boolean expressions (e.g. Eq, Ne),
-        and Python int for integer expressions.
+        Python float for float expressions, and Python int for integer expressions.
         """
         return _guarding_hint_or_throw_base(self, expr, {})
 
